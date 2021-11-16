@@ -233,19 +233,25 @@ def rnn_backward(dh, cache):
     # for i in reversed(range(dh.shape[1])):
     for i in range(dh.shape[1]-1, -1, -1):
       # print('iteration:', i)
+      # x, prev_h, Wx, Wh, next_h = cache[i]
 
       if (i == dh.shape[1] - 1):
         dprev_h = dh[:, i, :]
       else:
         dprev_h += dh[:, i, :]
-
+        
       dx1, dprev_h, dWx1, dWh1, db1 = rnn_step_backward(dprev_h, cache[i])
       if (i == dh.shape[1] - 1):
+        # dx =  torch.zeros_like(x).to(dx1.device).to(dx1.dtype)
         dx = torch.zeros((dh.shape[0], dh.shape[1], dWx1.shape[0])).to(dx1.device).to(dx1.dtype)
-        dh0 = torch.zeros((dh.shape[0], dh.shape[2])).to(dx1.device).to(dx1.dtype)
-        dWx = torch.zeros((dWx1.shape[0], dh.shape[2])).to(dx1.device).to(dx1.dtype)
-        dWh = torch.zeros((dh.shape[2], dh.shape[2])).to(dx1.device).to(dx1.dtype)
-        db = torch.zeros((dh.shape[2])).to(dx1.device).to(dx1.dtype)
+        dh0 = torch.zeros_like(dh).to(dx1.device).to(dx1.dtype)
+        dWx = torch.zeros_like(dWx1).to(dx1.device).to(dx1.dtype)
+        dWh = torch.zeros_like(dWh1).to(dx1.device).to(dx1.dtype)
+        db = torch.zeros_like(db1).to(dx1.device).to(dx1.dtype)
+        # dh0 = torch.zeros((dh.shape[0], dh.shape[2])).to(dx1.device).to(dx1.dtype)
+        # dWx = torch.zeros((dWx1.shape[0], dh.shape[2])).to(dx1.device).to(dx1.dtype)
+        # dWh = torch.zeros((dh.shape[2], dh.shape[2])).to(dx1.device).to(dx1.dtype)
+        # db = torch.zeros((dh.shape[2])).to(dx1.device).to(dx1.dtype)
         
 
       dx[:,i,:] = dx1
@@ -465,32 +471,26 @@ class CaptioningRNN(nn.Module):
         ##########################################################################
         # Replace "pass" statement with your code
 
-        ### CNN -> h0
-        # h0_w = Parameter(torch.randn(hidden_dim, input_dim,
-        #                 device=device, dtype=dtype)).div(math.sqrt(hidden_dim))
-        # h0_b = Parameter(torch.zeros(hidden_dim, device=device, dtype=dtype))
+        ### Linear / Affine transformations
+        ### CNN -> h0 / A
         self.h0_transform = nn.Linear(input_dim, hidden_dim, device=device, dtype=dtype)
-        # with torch.no_grad():
-          # self.h0_transform.weight.copy_(h0_w)
-          # self.h0_transform.bias.copy_(h0_b)
-
         ### h_i -> yhat_i
-        # yhat_w = Parameter(torch.rand(vocab_size, hidden_dim,
-        #                   device=device, dtype=dtype)).div(math.sqrt(vocab_size))
-        # yhat_b = Parameter(torch.zeros(vocab_size, device=device, dtype=dtype))
         self.yhat_transform = nn.Linear(hidden_dim, vocab_size, device=device, dtype=dtype)
-        # with torch.no_grad():
-        #   self.yhat_transform.weight.copy_(yhat_w)
-        #   self.yhat_transform.bias.copy_(yhat_b)
 
-        # Word Vectors
+        # Word Vectors x_i -> wordEmbedding -> h_i
         self.wordEmbedding_transform = WordEmbedding(vocab_size, wordvec_dim, device=device, dtype=dtype)
-
         
         # Idiosyncrasies
         if (cell_type=='rnn'):
           self.rnn = RNN(input_size=wordvec_dim, hidden_size=hidden_dim, device=device, dtype=dtype)
           self.featureExtractor = FeatureExtractor(pooling=True, device=device, dtype=dtype)
+        if (cell_type=='lstm'):
+          self.lstm = LSTM(input_size=wordvec_dim, hidden_size=hidden_dim, device=device, dtype=dtype)
+          self.featureExtractor = FeatureExtractor(pooling=True, device=device, dtype=dtype)
+        if (cell_type=='attention'):
+          self.attention = AttentionLSTM(input_size=wordvec_dim, hidden_size=hidden_dim, device=device, dtype=dtype)
+          self.featureExtractor = FeatureExtractor(pooling=False, device=device, dtype=dtype)
+
 
         #############################################################################
         #                              END OF YOUR CODE                             #
@@ -560,6 +560,12 @@ class CaptioningRNN(nn.Module):
         if (self.cell_type == 'rnn'):
           h0 = self.h0_transform(features)
           H = self.rnn.forward(x, h0)
+        if (self.cell_type == 'lstm'):
+          h0 = self.h0_transform(features)
+          H = self.lstm.forward(x, h0)
+        if (self.cell_type == 'attention'):
+          A = self.h0_transform(features.permute(0, 3, 2, 1)).permute(0, 3, 1, 2)
+          H = self.attention.forward(x, A)
         
         yhat = self.yhat_transform(H)
         loss = temporal_softmax_loss(yhat, captions_out, ignore_index=self.ignore_index)
@@ -629,22 +635,32 @@ class CaptioningRNN(nn.Module):
         ###########################################################################
         # Replace "pass" statement with your code
         features = self.featureExtractor.extract_mobilenet_feature(images)
-        h = self.h0_transform(features)
         start_idx = torch.zeros(N).fill_(self._start).long()
         x = self.wordEmbedding_transform.forward(start_idx)
-
-        if (self.cell_type == 'rnn'):
-          for i in range(max_length):
-            h_current = self.rnn.step_forward(x, h)
+        if (self.cell_type == 'attention'):
+          A = self.h0_transform(features.permute(0, 3, 2, 1)).permute(0, 3, 1, 2)
+          h = A.mean(dim=(2, 3))
+          c = h
+        else:
+          h = self.h0_transform(features)
         
-            yhat = self.yhat_transform(h_current)
-            h = h_current # update h
-            max_idx= torch.max(yhat,1)[1]
-            captions[:,i] = max_idx
-            # print(captions)
-            x = self.wordEmbedding_transform.forward(max_idx)
-          # print(captions.shape)
+        if (self.cell_type == 'lstm'):
+          c = torch.zeros_like(h)
 
+        for i in range(max_length):
+          if (self.cell_type == 'rnn'):
+            next_h = self.rnn.step_forward(x, h)
+          if (self.cell_type == 'lstm'):
+            next_h, c = self.lstm.step_forward(x, h, c)
+          if (self.cell_type == 'attention'):
+            attn, attn_weights_all[:, i, :, :] = dot_product_attention(h, A)
+            next_h, c = self.attention.step_forward(x, h, c, attn)
+
+          yhat = self.yhat_transform(next_h)
+          h = next_h
+          max_idx = torch.max(yhat, 1)[1]
+          captions[:, i] = max_idx
+          x = self.wordEmbedding_transform.forward(max_idx)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -685,7 +701,11 @@ def lstm_step_forward(x, prev_h, prev_c, Wx, Wh, b, attn=None, Wattn=None):
     # You may want to use torch.sigmoid() for the sigmoid function.             #
     #############################################################################
     # Replace "pass" statement with your code
-    actVector = prev_h.mm(Wh) + x.mm(Wx) + b
+    if (attn != None):
+      actVector = prev_h.mm(Wh) + x.mm(Wx) + attn.mm(Wattn) + b
+    else:
+      actVector = prev_h.mm(Wh) + x.mm(Wx) + b
+
     x = actVector.shape[1] // 4
 
     _i = actVector[:, 0:x]
@@ -739,11 +759,10 @@ def lstm_forward(x, h0, Wx, Wh, b):
     c = torch.zeros(x.shape[0], x.shape[1], h0.shape[1]).to(x.dtype).to(x.device)
 
     for i in range(x.shape[1]):
-      print('i', i)
       if (i == 0):
-        h[:, i, :], c[:, i, :] = lstm_step_forward(x[:, i, :], h0, c0, Wx, Wh, b)
+        h[:, i, :], c[:, i, :] = lstm_step_forward(x[:, i, :], h0.clone(), c0.clone(), Wx, Wh, b)
       else:
-        h[:, i, :], c[:, i, :] = lstm_step_forward(x[:, i, :], h[:, i-1, :], c[:, i-1, :], Wx, Wh, b)
+        h[:, i, :], c[:, i, :] = lstm_step_forward(x[:, i, :], h[:, i-1, :].clone(), c[:, i-1, :].clone(), Wx, Wh, b)
 
     ##############################################################################
     #                               END OF YOUR CODE                             #
@@ -832,7 +851,12 @@ def dot_product_attention(prev_h, A):
     # HINT: Make sure you reshape attn_weights back to (N, 4, 4)!               #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    # [2, 5]
+    # [2, 5, 4, 4]
+    alignment = torch.bmm(prev_h.view(N, 1, H), A.view(N, H, 16)).squeeze() / (H**0.5)
+    attn_weights = F.softmax(alignment, dim=1)
+    attn = torch.bmm(A.view(N, H, 16), attn_weights.view(N, 16, 1)).squeeze()
+    attn_weights = attn_weights.view(N, 4, 4)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -881,7 +905,30 @@ def attention_forward(x, A, Wx, Wh, Wattn, b):
     # function that you just defined.                                           #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+
+    # N, T, D = x.shape
+    # H = h0.shape[1]
+
+    # h = torch.zeros([N, T, H]).to(h0.device).to(h0.dtype)
+
+    # for t in range(T):
+    #     if t == 0:
+    #       atten,_ = dot_product_attention(h0, A)
+    #       h[:, t, :], c = lstm_step_forward(x[:, t, :], h0.clone(), c0, Wx, Wh, b, atten, Wattn)
+    #     else:
+    #       atten,_ = dot_product_attention(h[:, t - 1, :].clone(), A)
+    #       h[:, t, :], c = lstm_step_forward(x[:, t, :], h[:, t - 1, :].clone(), c, Wx, Wh, b,  atten, Wattn)
+    
+    h = torch.zeros(x.shape[0], x.shape[1], A.shape[1]).to(h0.device).to(h0.dtype)
+    # h[:, 0, :] = h0
+
+    for i in range(x.shape[1]):
+      if (i==0):  
+        attn, _ = dot_product_attention(h0, A)
+        h[:, i, :], c = lstm_step_forward(x[:, i, :], h0.clone(), c0, Wx, Wh, b, attn=attn ,Wattn=Wattn)
+      else:
+        attn, _ = dot_product_attention(h[:, i-1, :].clone(), A)
+        h[:, i, :], c = lstm_step_forward(x[:, i, :], h[:, i-1, :].clone(), c, Wx, Wh, b, attn=attn ,Wattn=Wattn)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
