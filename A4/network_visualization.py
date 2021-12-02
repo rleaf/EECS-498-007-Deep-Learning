@@ -11,6 +11,7 @@ import torch
 # import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+from torch._C import device
 from a4_helper import *
 
 
@@ -47,7 +48,29 @@ def compute_saliency_maps(X, y, model):
   # Hint: X.grad.data stores the gradients                                     #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+
+  scores = model(X)
+
+  # print('X', X.shape)
+  # print('y', y.shape)
+  # print('scores', scores.shape)
+  correctScore = torch.zeros_like(y, dtype=torch.float32)
+
+  for i in range(y.shape[0]):
+    correctScore[i] = scores[i, y[i]]
+  # print('y', y)
+  # print('y2', correctScore)
+  # https://stackoverflow.com/questions/50999977/what-does-the-gather-function-do-in-pytorch-in-layman-terms
+  # scores = (scores.gather(1, y.view(-1, 1)).squeeze())
+  #backward pass
+  correctScore.backward(torch.ones(X.shape[0], device=X.device))
+  # print('toaders', X.grad.data.shape)
+  # scores.backward(torch.ones(X.shape[0], device=X.device))
+  #saliency
+  print('aed', X.grad.data.shape)
+  # Says to take the max value of the 3 color channels per pixel, but could summing work too?
+  # saliency = torch.sum(X.grad.data.abs(), dim=1)
+  saliency, _ = torch.max(X.grad.data.abs(), dim=1)
   ##############################################################################
   #               END OF YOUR CODE                                             #
   ##############################################################################
@@ -88,7 +111,23 @@ def make_adversarial_attack(X, target_y, model, max_iter=100, verbose=True):
   # You can print your progress over iterations to check your algorithm.       #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  hmm = 0
+  for i in range(max_iter):
+    scores = model(X_adv)
+    _, ypred = torch.max(scores, dim=1)
+    if(ypred == target_y):
+      break
+    
+    scores[:, target_y].backward()
+
+    with torch.no_grad():
+      # don't need X_adv.grad.data ?
+      X_adv += learning_rate * (X_adv.grad / torch.norm(X_adv.grad))
+      # X_adv.grad.data.zero_()
+    # print('dta', X_adv.shape)
+    # print(X_adv.grad.data)  
+    hmm += 1
+  print(f'{hmm} iterations')
   ##############################################################################
   #                             END OF YOUR CODE                               #
   ##############################################################################
@@ -123,7 +162,14 @@ def class_visualization_step(img, target_y, model, **kwargs):
     # after each step.                                                     #
     ########################################################################
     # Replace "pass" statement with your code
-    pass
+    scores = model(img)
+
+    I = scores[:, target_y] - (l2_reg * (torch.norm(img)**2))
+    I.backward()
+    
+    with torch.no_grad():
+      img += learning_rate * (img.grad / torch.norm(img.grad))
+      img.grad.zero_()
     ########################################################################
     #                             END OF YOUR CODE                         #
     ########################################################################
